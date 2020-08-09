@@ -129,23 +129,40 @@ class LibreDataParser {
                 // If the values are already available in userdefaults , then use those values
                 if let libre1DerivedAlgorithmParameters = UserDefaults.standard.libre1DerivedAlgorithmParameters, libre1DerivedAlgorithmParameters.serialNumber == libreSensorSerialNumber.serialNumber {
                     
-                    trace("in libreDataProcessor, found libre1DerivedAlgorithmParameters in UserDefaults", log: log, category: ConstantsLog.categoryLibreOOPClient, type: .info)
-                    
-                    // parse the data using oop web algorithm
-                    let parsedResult = parseLibre1DataWithOOPWebCalibration(libreData: libreData, libre1DerivedAlgorithmParameters: libre1DerivedAlgorithmParameters, timeStampLastBgReading: timeStampLastBgReading)
-                    
-                    handleGlucoseData(result: (parsedResult.libreRawGlucoseData.map { $0 as GlucoseData }, parsedResult.sensorTimeInMinutes, parsedResult.sensorState, nil), cgmTransmitterDelegate: cgmTransmitterDelegate, libreSensorSerialNumber: libreSensorSerialNumber, completionHandler: completionHandler)
-                    
-                    return
-                    
+                    // only for libre1 en libre1A2 : in some cases libre1DerivedAlgorithmParameters is stored wiht slope_slope = 0, this doesn't work, reset the userdefaults to nil. The parameters will be fetched again from OOP Web
+                    // for libre1A2 : this check on slope_slope = 0 has been removed some time ago, with commit b8d5b0dea77b098a1c9d88e410f485b7b17b8fd7, so solve issues with libre1A2, so it looks as if b8d5b0dea77b098a1c9d88e410f485b7b17b8fd7 should be undone
+                    // checking on slope_slope should have the same result, ie it's an invalid libre1DerivedAlgorithmParameters
+                    if (libreSensorType == .libre1 || libreSensorType == .libre1A2) && libre1DerivedAlgorithmParameters.slope_slope == 0 {
+                        
+                        UserDefaults.standard.libre1DerivedAlgorithmParameters = nil
+                        
+                    } else {
+                        
+                        trace("in libreDataProcessor, found libre1DerivedAlgorithmParameters in UserDefaults", log: log, category: ConstantsLog.categoryLibreOOPClient, type: .info)
+                        
+                        // if debug level logging enabled, than add full dump of libre1DerivedAlgorithmParameters in the trace (checking here to save some processing time if it's not needed
+                        if UserDefaults.standard.addDebugLevelLogsInTraceFileAndNSLog {
+                            trace("in libreDataProcessor, libre1DerivedAlgorithmParameters = %{public}@", log: log, category: ConstantsLog.categoryLibreDataParser, type: .debug, libre1DerivedAlgorithmParameters.description)
+                        }
+                        
+                        // parse the data using oop web algorithm
+                        let parsedResult = parseLibre1DataWithOOPWebCalibration(libreData: libreData, libre1DerivedAlgorithmParameters: libre1DerivedAlgorithmParameters, timeStampLastBgReading: timeStampLastBgReading)
+                        
+                        handleGlucoseData(result: (parsedResult.libreRawGlucoseData.map { $0 as GlucoseData }, parsedResult.sensorTimeInMinutes, parsedResult.sensorState, nil), cgmTransmitterDelegate: cgmTransmitterDelegate, libreSensorSerialNumber: libreSensorSerialNumber, completionHandler: completionHandler)
+                        
+                        return
+                        
+                    }
+
                 }
 
                 // get LibreDerivedAlgorithmParameters and parse using the libre1DerivedAlgorithmParameters
                 LibreOOPClient.getOopWebCalibrationStatus(bytes: libreData, libreSensorSerialNumber: libreSensorSerialNumber, oopWebSite: oopWebSite, oopWebToken: oopWebToken) { (oopWebCalibrationStatus, xDripError) in
 
                     if let oopWebCalibrationStatus = oopWebCalibrationStatus as? OopWebCalibrationStatus,
-                        let slope = oopWebCalibrationStatus.slope,
-                        let libre1DerivedAlgorithmParameters = Libre1DerivedAlgorithmParameters(slope_slope: slope.slopeSlope ?? 0, slope_offset: slope.slopeOffset ?? 0, offset_slope: slope.offsetSlope ?? 0, offset_offset: slope.offsetOffset ?? 0, isValidForFooterWithReverseCRCs: Int(slope.isValidForFooterWithReverseCRCs ?? 1), extraSlope: 1.0, extraOffset: 0.0, sensorSerialNumber: libreSensorSerialNumber.serialNumber) {
+                        let slope = oopWebCalibrationStatus.slope {
+                        
+                        let libre1DerivedAlgorithmParameters = Libre1DerivedAlgorithmParameters(slope_slope: slope.slopeSlope ?? 0, slope_offset: slope.slopeOffset ?? 0, offset_slope: slope.offsetSlope ?? 0, offset_offset: slope.offsetOffset ?? 0, isValidForFooterWithReverseCRCs: Int(slope.isValidForFooterWithReverseCRCs ?? 1), extraSlope: 1.0, extraOffset: 0.0, sensorSerialNumber: libreSensorSerialNumber.serialNumber)
                         
                         // store result in UserDefaults, next time, server will not be used anymore, we will use the stored value
                         UserDefaults.standard.libre1DerivedAlgorithmParameters = libre1DerivedAlgorithmParameters
@@ -280,6 +297,11 @@ fileprivate func trendMeasurements(bytes: Data, mostRecentReadingDate: Date, tim
         if measurementDate > timeStampLastBgReading {
             let measurement = LibreMeasurement(bytes: measurementBytes, slope: slope, offset: offset, date: measurementDate, libre1DerivedAlgorithmParameters: libre1DerivedAlgorithmParameters)
             measurements.append(measurement)
+            
+            if UserDefaults.standard.addDebugLevelLogsInTraceFileAndNSLog {
+                trace("in trendMeasurements, created measurement with measurement.rawGlucose = %{public}@", log: log, category: ConstantsLog.categoryLibreDataParser, type: .info, measurement.rawGlucose.description)
+            }
+            
         }
         
     }
@@ -318,6 +340,10 @@ fileprivate func historyMeasurements(bytes: Data, timeStampLastBgReading: Date, 
             let measurement = LibreMeasurement(bytes: measurementBytes, slope: slope, offset: offset, minuteCounter: Int(timeInMinutes.rawValue), date: measurementDate, libre1DerivedAlgorithmParameters: libre1DerivedAlgorithmParameters)
             measurements.append(measurement)
             
+            if UserDefaults.standard.addDebugLevelLogsInTraceFileAndNSLog {
+                trace("in historyMeasurements, created measurement with measurement.rawGlucose = %{public}@", log: log, category: ConstantsLog.categoryLibreDataParser, type: .info, measurement.rawGlucose.description)
+            }
+
         } else {
             break
         }
@@ -443,6 +469,9 @@ fileprivate func parseLibre1DataWithOOPWebCalibration(libreData: Data, libre1Der
                 if timeStampOfNewGlucoseData.toMillisecondsAsDouble() < timeStampLastAddedGlucoseDataAsDouble - (5 * 60 * 1000 - 10000) {
                     timeStampLastAddedGlucoseDataAsDouble = timeStampOfNewGlucoseData.toMillisecondsAsDouble()
                     finalResult.append(glucose)
+                    
+                    trace("in parseLibre1DataWithOOPWebCalibration, processGlucoseData, created glucose = %{public}@ and timestamp = %{public}@", log: log, category: ConstantsLog.categoryLibreDataParser, type: .info, glucose.glucoseLevelRaw.description, glucose.timeStamp.description(with: .current))
+                    
                 }
                 
             } else {
