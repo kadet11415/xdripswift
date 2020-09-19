@@ -35,13 +35,13 @@ class CGMMiaoMiaoTransmitter:BluetoothTransmitter, CGMTransmitter {
     private var resendPacketCounter:Int = 0
     
     /// used when processing MiaoMiao data packet
-    private var timestampFirstPacketReception:Date
+    private var timestampLastPacketReception:Date
     
     /// receive buffer for miaomiao packets
     private var rxBuffer:Data
     
     /// how long to wait for next packet before sending startreadingcommand
-    private static let maxWaitForpacketInSeconds = 5.0
+    private static let maxWaitForpacketInSeconds = 3.0
     
     /// length of header added by MiaoMiao in front of data dat is received from Libre sensor
     private let miaoMiaoHeaderLength = 18
@@ -94,7 +94,7 @@ class CGMMiaoMiaoTransmitter:BluetoothTransmitter, CGMTransmitter {
 
         // initialize rxbuffer
         rxBuffer = Data()
-        timestampFirstPacketReception = Date()
+        timestampLastPacketReception = Date()
         
         // initialize timeStampLastBgReading
         self.timeStampLastBgReading = timeStampLastBgReading ?? Date(timeIntervalSince1970: 0)
@@ -143,10 +143,13 @@ class CGMMiaoMiaoTransmitter:BluetoothTransmitter, CGMTransmitter {
         if let value = characteristic.value {
             
             //check if buffer needs to be reset
-            if (Date() > timestampFirstPacketReception.addingTimeInterval(CGMMiaoMiaoTransmitter.maxWaitForpacketInSeconds - 1)) {
+            if (Date() > timestampLastPacketReception.addingTimeInterval(CGMMiaoMiaoTransmitter.maxWaitForpacketInSeconds)) {
                 trace("in peripheral didUpdateValueFor, more than %{public}@ seconds since last update - or first update since app launch, resetting buffer", log: log, category: ConstantsLog.categoryCGMMiaoMiao, type: .info, CGMMiaoMiaoTransmitter.maxWaitForpacketInSeconds.description)
                 resetRxBuffer()
             }
+            
+            // set timestampLastPacketReception to now, this gives the MM again maxWaitForpacketInSeconds seconds to send the next packet
+            timestampLastPacketReception = Date()
             
             //add new packet to buffer
             rxBuffer.append(value)
@@ -175,34 +178,36 @@ class CGMMiaoMiaoTransmitter:BluetoothTransmitter, CGMTransmitter {
                                 
                             }
                             
+                            var dataIsDecryptedToLibre1Format = false
+
                             if let libreSensorType = LibreSensorType.type(patchInfo: patchInfo) {
+                                // note that we should always have a libreSensorType
                                 
                                 cGMMiaoMiaoTransmitterDelegate?.received(libreSensorType: libreSensorType, from: self)
+
+                                // decrypt of libre2 or libreUS
+                                dataIsDecryptedToLibre1Format = libreSensorType.decryptIfPossibleAndNeeded(rxBuffer: &rxBuffer, headerLength: miaoMiaoHeaderLength, log: log, patchInfo: patchInfo, uid: rxBuffer[5..<13].bytes)
                                 
-                                // do CRC Check only for libre1
-                                // TODO : check if this also required for other LibreH
-                                if libreSensorType == .libre1 {
-                                    
-                                    guard Crc.LibreCrc(data: &rxBuffer, headerOffset: miaoMiaoHeaderLength) else {
-                                        
-                                        let temp = resendPacketCounter
-                                        resetRxBuffer()
-                                        resendPacketCounter = temp + 1
-                                        if resendPacketCounter < maxPacketResendRequests {
-                                            trace("in peripheral didUpdateValueFor, crc error encountered. New attempt launched", log: log, category: ConstantsLog.categoryCGMMiaoMiao, type: .info)
-                                            _ = sendStartReadingCommand()
-                                        } else {
-                                            trace("in peripheral didUpdateValueFor, crc error encountered. Maximum nr of attempts reached", log: log, category: ConstantsLog.categoryCGMMiaoMiao, type: .info)
-                                            resendPacketCounter = 0
-                                        }
-                                        
-                                        return
+                                // now except libreProH, all libres' 344 data is libre1 format
+                                // should crc check
+                                guard libreSensorType.crcIsOk(rxBuffer: &self.rxBuffer, headerLength: miaoMiaoHeaderLength, log: log) else {
+
+                                    let temp = resendPacketCounter
+                                    resetRxBuffer()
+                                    resendPacketCounter = temp + 1
+                                    if resendPacketCounter < maxPacketResendRequests {
+                                        trace("in peripheral didUpdateValueFor, crc error encountered. New attempt launched", log: log, category: ConstantsLog.categoryCGMMiaoMiao, type: .info)
+                                        _ = sendStartReadingCommand()
+                                    } else {
+                                        trace("in peripheral didUpdateValueFor, crc error encountered. Maximum nr of attempts reached", log: log, category: ConstantsLog.categoryCGMMiaoMiao, type: .info)
+                                        resendPacketCounter = 0
                                     }
+
+                                    return
                                     
                                 }
-                                
+
                             }
-                                
                                 
                             //get MiaoMiao info from MiaoMiao header
                             let firmware = String(describing: rxBuffer[14...15].hexEncodedString())
@@ -239,7 +244,7 @@ class CGMMiaoMiaoTransmitter:BluetoothTransmitter, CGMTransmitter {
                                 
                             }
                             
-                            LibreDataParser.libreDataProcessor(libreSensorSerialNumber: LibreSensorSerialNumber(withUID: Data(rxBuffer.subdata(in: 5..<13))), patchInfo: patchInfo, webOOPEnabled: webOOPEnabled, oopWebSite: oopWebSite, oopWebToken: oopWebToken, libreData: (rxBuffer.subdata(in: miaoMiaoHeaderLength..<(344 + miaoMiaoHeaderLength))), cgmTransmitterDelegate: cgmTransmitterDelegate, timeStampLastBgReading: timeStampLastBgReading, completionHandler: { (timeStampLastBgReading: Date?, sensorState: LibreSensorState?, xDripError: XdripError?) in
+                            LibreDataParser.libreDataProcessor(libreSensorSerialNumber: LibreSensorSerialNumber(withUID: Data(rxBuffer.subdata(in: 5..<13))), patchInfo: patchInfo, webOOPEnabled: webOOPEnabled, oopWebSite: oopWebSite, oopWebToken: oopWebToken, libreData: (rxBuffer.subdata(in: miaoMiaoHeaderLength..<(344 + miaoMiaoHeaderLength))), cgmTransmitterDelegate: cgmTransmitterDelegate, timeStampLastBgReading: timeStampLastBgReading, dataIsDecryptedToLibre1Format: dataIsDecryptedToLibre1Format, completionHandler: { (timeStampLastBgReading: Date?, sensorState: LibreSensorState?, xDripError: XdripError?) in
                                 
                                 if let timeStampLastBgReading = timeStampLastBgReading {
                                     self.timeStampLastBgReading = timeStampLastBgReading
@@ -350,8 +355,116 @@ class CGMMiaoMiaoTransmitter:BluetoothTransmitter, CGMTransmitter {
     /// reset rxBuffer, reset startDate, set resendPacketCounter to 0
     private func resetRxBuffer() {
         rxBuffer = Data()
-        timestampFirstPacketReception = Date()
+        timestampLastPacketReception = Date()
         resendPacketCounter = 0
+    }
+
+    /// to make tests, value should be full data packet, ie full rxbuffer
+    public static func testPeripheralDidUpdateValue(value: Data) {
+        
+        let miaoMiaoHeaderLength = 18
+        
+        var sensorSerialNumber:String = "hello"
+        
+        var rxBuffer = value
+        
+        //check type of message and process according to type
+        if let firstByte = rxBuffer.first {
+            if let miaoMiaoResponseState = MiaoMiaoResponseType(rawValue: firstByte) {
+                switch miaoMiaoResponseState {
+                    
+                case .dataPacket:
+                    //if buffer complete, then start processing
+                    if rxBuffer.count >= 363  {
+                        
+                        /// gives information about type of sensor (Libre1, Libre2, etc..) - if transmitter doesn't offer patchInfo, then use nil value, which corresponds to Libre 1
+                        var patchInfo: String?
+                        
+                        // first off all see if the buffer contains patchInfo, and if yes send to delegate
+                        if rxBuffer.count >= 369 {
+                            
+                            patchInfo = Data(rxBuffer[363...368]).hexEncodedString().uppercased()
+                            
+                            if let patchInfo = patchInfo {
+                                debuglogging("received patchInfo " + patchInfo)
+                            }
+                            
+                        }
+                        
+                        var dataIsDecryptedToLibre1Format = false
+                        
+                        if let libreSensorType = LibreSensorType.type(patchInfo: patchInfo) {
+                            // note that we should always have a libreSensorType
+                            
+                            debuglogging("libresensortype = " + libreSensorType.description)
+                            
+                            // decrypt of libre2 or libreUS
+                            dataIsDecryptedToLibre1Format = libreSensorType.decryptIfPossibleAndNeeded(rxBuffer: &rxBuffer, headerLength: miaoMiaoHeaderLength, log: nil, patchInfo: patchInfo, uid: rxBuffer[5..<13].bytes)
+                            
+                            // now except libreProH, all libres' 344 data is libre1 format
+                            // should crc check
+                            guard libreSensorType.crcIsOk(rxBuffer: &rxBuffer, headerLength: miaoMiaoHeaderLength, log: nil) else {
+                                
+                                debuglogging("crc is not ok")
+                                
+                                return
+                                
+                            }
+                            
+                        }
+                        
+                        //get MiaoMiao info from MiaoMiao header
+                        //let firmware = String(describing: rxBuffer[14...15].hexEncodedString())
+                        //let hardware = String(describing: rxBuffer[16...17].hexEncodedString())
+                        //let batteryPercentage = Int(rxBuffer[13])
+                        
+                        // get sensor serialNumber and if changed inform delegate
+                        if let libreSensorSerialNumber = LibreSensorSerialNumber(withUID: Data(rxBuffer.subdata(in: 5..<13))) {
+                            
+                            // (there will also be a seperate opcode form MiaoMiao because it's able to detect new sensor also)
+                            if libreSensorSerialNumber.serialNumber != sensorSerialNumber {
+                                
+                                sensorSerialNumber = libreSensorSerialNumber.serialNumber
+                                
+                                debuglogging("    new sensor detected :  " + libreSensorSerialNumber.serialNumber)
+                                
+                            }
+                            
+                        }
+                        
+                        LibreDataParser.libreDataProcessor(libreSensorSerialNumber: LibreSensorSerialNumber(withUID: Data(rxBuffer.subdata(in: 5..<13))), patchInfo: patchInfo, webOOPEnabled: false, oopWebSite: ConstantsLibre.site, oopWebToken: ConstantsLibre.token, libreData: (rxBuffer.subdata(in: miaoMiaoHeaderLength..<(344 + miaoMiaoHeaderLength))), cgmTransmitterDelegate: nil, timeStampLastBgReading: Date(timeIntervalSince1970: 0), dataIsDecryptedToLibre1Format: dataIsDecryptedToLibre1Format, completionHandler: { (timeStampLastBgReading: Date?, sensorState: LibreSensorState?, xDripError: XdripError?) in
+                            
+                            if let timeStampLastBgReading = timeStampLastBgReading {
+                                debuglogging("timeStampLastBgReading = " + timeStampLastBgReading.description(with: .current))
+                            }
+                            
+                            if let sensorState = sensorState {
+                                debuglogging("sensorstate = " + sensorState.description)
+                            }
+                            
+                            
+                        })
+                        
+                        
+                    }
+                    
+                case .frequencyChangedResponse:
+                    break
+                    
+                case .newSensor:
+                    break
+                    
+                case .noSensor:
+                    break
+                    
+                }
+            } else {
+                //rxbuffer doesn't start with a known miaomiaoresponse
+                //reset the buffer and send start reading command
+                
+            }
+        }
+
     }
     
 }
